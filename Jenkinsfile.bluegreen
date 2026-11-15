@@ -1,0 +1,77 @@
+pipeline {
+  agent any
+  parameters {
+    choice(name: 'ACTION', choices: ['deploy', 'rollback'], description: 'deploy or rollback')
+  }
+  environment {
+    IMAGE = "${env.DOCKERHUB_USER}/devops-pbl3"
+    TAG   = "bg-${BUILD_NUMBER}"
+  }
+  stages {
+    stage('Find Live Color') {
+      steps {
+        script {
+          def live = sh(script: "kubectl get svc bluegreen-svc -o jsonpath='{.spec.selector.version}' 2>/dev/null || echo none",
+                        returnStdout: true).trim()
+          env.LIVE = (live == 'blue' || live == 'green') ? live : 'none'
+          env.IDLE = (env.LIVE == 'blue') ? 'green' : 'blue'
+          echo "Live color: ${env.LIVE} | Target (idle) color: ${env.IDLE}"
+        }
+      }
+    }
+    stage('Build & Push Image') {
+      when { expression { params.ACTION == 'deploy' } }
+      steps {
+        sh 'docker build -t $IMAGE:$TAG .'
+        withCredentials([usernamePassword(credentialsId: 'dockerhub-creds',
+                         usernameVariable: 'DU', passwordVariable: 'DP')]) {
+          sh 'echo "$DP" | docker login -u "$DU" --password-stdin && docker push $IMAGE:$TAG'
+        }
+      }
+    }
+    stage('Deploy to Idle Color') {
+      when { expression { params.ACTION == 'deploy' } }
+      steps {
+        sh '''
+          sed -e "s|COLOR|$IDLE|g" -e "s|IMAGE_PLACEHOLDER|$IMAGE:$TAG|g" \
+              -e "s|VERSION_PLACEHOLDER|$TAG|g" k8s/bluegreen/deployment.yaml | kubectl apply -f -
+          kubectl rollout status deployment/devops-app-$IDLE --timeout=120s
+        '''
+      }
+    }
+    stage('Smoke Test Idle Color') {
+      when { expression { params.ACTION == 'deploy' } }
+      steps {
+        sh '''
+          kubectl port-forward deployment/devops-app-$IDLE 9090:3000 > /dev/null 2>&1 &
+          PF=$!
+          set +e
+          sleep 5
+          curl -sf http://localhost:9090/health && curl -s http://localhost:9090/
+          RC=$?
+          kill $PF
+          exit $RC
+        '''
+      }
+    }
+    stage('Approve Switch') {
+      when { expression { params.ACTION == 'deploy' } }
+      steps {
+        input id: 'SwitchTraffic', message: "Smoke test passed. Switch live traffic to ${env.IDLE}?", ok: 'Switch'
+      }
+    }
+    stage('Switch Traffic') {
+      steps {
+        sh '''
+          kubectl get deployment devops-app-$IDLE
+          sed "s|COLOR|$IDLE|g" k8s/bluegreen/service.yaml | kubectl apply -f -
+          echo "Live traffic now on: $IDLE"
+        '''
+      }
+    }
+  }
+  post {
+    failure { echo "Pipeline failed. Live color (${env.LIVE}) was NOT changed, users are unaffected." }
+    always  { sh 'docker logout || true' }
+  }
+}

@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: devops-app-COLOR
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: devops-app-bg
+      version: COLOR
+  template:
+    metadata:
+      labels:
+        app: devops-app-bg
+        version: COLOR
+    spec:
+      containers:
+        - name: devops-app
+          image: IMAGE_PLACEHOLDER
+          ports:
+            - containerPort: 3000
+          env:
+            - name: APP_COLOR
+              value: "COLOR"
+            - name: APP_VERSION
+              value: "VERSION_PLACEHOLDER"
+          readinessProbe:
+            httpGet: { path: /health, port: 3000 }
+            initialDelaySeconds: 3
