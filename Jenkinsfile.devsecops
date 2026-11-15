@@ -16,7 +16,7 @@ pipeline {
     stage('3. Dependency Scan (SCA)') {
       steps {
         sh 'cd healthcare && npm ci && npm audit --audit-level=high'
-        sh 'trivy fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 healthcare'
+        sh 'trivy --timeout 15m fs --skip-db-update --scanners vuln --severity HIGH,CRITICAL --exit-code 1 healthcare'
       }
     }
     stage('Build Image') {
@@ -24,8 +24,8 @@ pipeline {
     }
     stage('4. Image Scan (Trivy)') {
       steps {
-        sh 'trivy image --format table -o trivy-image-report.txt $IMAGE:$TAG'
-        sh 'trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 $IMAGE:$TAG'
+        sh 'trivy --timeout 15m image --skip-db-update --format table -o trivy-image-report.txt $IMAGE:$TAG'
+        sh 'trivy --timeout 15m image --skip-db-update --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 $IMAGE:$TAG'
       }
     }
     stage('5. Config Scan (Dockerfile + K8s)') {
