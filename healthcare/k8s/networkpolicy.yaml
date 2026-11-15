@@ -1,0 +1,12 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: healthcare-allow-api-only
+  namespace: healthcare
+spec:
+  podSelector:
+    matchLabels: { app: healthcare-api }
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports:
+        - port: 3000

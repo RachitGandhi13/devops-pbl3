@@ -1,0 +1,76 @@
+pipeline {
+  agent any
+  environment {
+    IMAGE = "${env.DOCKERHUB_USER}/healthcare-api"
+    TAG   = "${BUILD_NUMBER}"
+  }
+  stages {
+    stage('Checkout') { steps { deleteDir(); checkout scm } }
+
+    stage('1. Secret Scan (Gitleaks)') {
+      steps { sh 'gitleaks detect --source healthcare --no-git --redact --verbose' }
+    }
+    stage('2. SAST (Semgrep)') {
+      steps { sh 'semgrep scan --config p/javascript --config p/owasp-top-ten --error --metrics=off healthcare/' }
+    }
+    stage('3. Dependency Scan (SCA)') {
+      steps {
+        sh 'cd healthcare && npm ci && npm audit --audit-level=high'
+        sh 'trivy fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 healthcare'
+      }
+    }
+    stage('Build Image') {
+      steps { sh 'docker build -t $IMAGE:$TAG healthcare' }
+    }
+    stage('4. Image Scan (Trivy)') {
+      steps {
+        sh 'trivy image --format table -o trivy-image-report.txt $IMAGE:$TAG'
+        sh 'trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 $IMAGE:$TAG'
+      }
+    }
+    stage('5. Config Scan (Dockerfile + K8s)') {
+      steps { sh 'trivy config --severity HIGH,CRITICAL --exit-code 1 healthcare' }
+    }
+    stage('Push Image') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'dockerhub-creds',
+                         usernameVariable: 'DU', passwordVariable: 'DP')]) {
+          sh 'echo "$DP" | docker login -u "$DU" --password-stdin && docker push $IMAGE:$TAG'
+        }
+      }
+    }
+    stage('6. Secure Deploy') {
+      steps {
+        withCredentials([string(credentialsId: 'healthcare-api-key', variable: 'API_KEY')]) {
+          sh '''
+            kubectl create namespace healthcare --dry-run=client -o yaml | kubectl apply -f -
+            kubectl -n healthcare create secret generic healthcare-secret \
+              --from-literal=API_KEY="$API_KEY" --dry-run=client -o yaml | kubectl apply -f -
+            sed "s|IMAGE_PLACEHOLDER|$IMAGE:$TAG|g" healthcare/k8s/deployment.yaml | kubectl apply -f -
+            kubectl apply -f healthcare/k8s/networkpolicy.yaml
+            kubectl -n healthcare rollout status deployment/healthcare-api --timeout=120s
+          '''
+        }
+      }
+    }
+    stage('7. DAST (OWASP ZAP)') {
+      steps {
+        sh '''
+          kubectl -n healthcare port-forward --address 0.0.0.0 svc/healthcare-svc 9091:80 > /dev/null 2>&1 &
+          PF=$!
+          set +e
+          sleep 5
+          docker run --rm -v "$PWD":/zap/wrk:rw ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py -t http://host.docker.internal:9091 -r zap-report.html -I
+          kill $PF
+        '''
+      }
+    }
+  }
+  post {
+    always {
+      archiveArtifacts artifacts: 'trivy-image-report.txt, zap-report.html', allowEmptyArchive: true
+      sh 'docker logout || true'
+    }
+  }
+}
